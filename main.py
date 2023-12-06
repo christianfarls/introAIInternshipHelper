@@ -1,9 +1,10 @@
 # main.py
 
 from openai import OpenAI
+from bs4 import BeautifulSoup
 import json
 import requests
-import re
+import time
 
 # Create instructions for chatbot
 INSTRUCTIONS = ("Your job is to assist the user in finding a suitable internship."
@@ -12,9 +13,9 @@ INSTRUCTIONS = ("Your job is to assist the user in finding a suitable internship
                 "The chat history is provided to you."
                 "Use the json string provided to give recommendations."
                 "If the user asks you for more information, "
-                "simply respond ONLY with the link to that application and no other text."
-                "If no further information can be found from the webpage, tell that to the user."
-                "If it can, suggest the extra information it provides.")
+                "tell them to paste the link, starting with 'https'."
+                "Start the conversation by asking some general information about the user,"
+                "given the categories in the json.")
 
 # Use API Key to access GPT API
 client = OpenAI(api_key="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")
@@ -24,6 +25,50 @@ with open('data.json', 'r') as file:
     data = json.load(file)
 
 data_string = json.dumps(data)
+
+def fetch_webpage(url):
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()  # Test for failed HTTP request
+        return response.text
+    except requests.exceptions.HTTPError as errh:
+        print("Http Error:", errh)
+    except requests.exceptions.ConnectionError as errc:
+        print("Error Connecting:", errc)
+    except requests.exceptions.Timeout as errt:
+        print("Timeout Error:", errt)
+    except requests.exceptions.RequestException as err:
+        print("OOps: Something Else", err)
+    return None
+
+def parse_webpage(html_content):
+    soup = BeautifulSoup(html_content, 'html.parser')
+    text = ""
+
+    # Collect all text from webpage
+    for paragraph in soup.find_all('p'):
+        text += paragraph.get_text() + "\n"
+
+    return text
+
+# Separating the api call to allow for rate limiting
+def call_openai_api(messages, max_retries=3, delay=10):
+    for attempt in range(max_retries):
+        try:
+            completion = client.chat.completions.create(
+                model="gpt-4",
+                messages=messages
+            )
+            return completion
+        except openai.RateLimitError as e:
+            wait_time = e.response.json()['error'].get('retry_after', delay)
+            print(f"Rate limit exceeded. Retrying in {wait_time} seconds...")
+            time.sleep(wait_time)
+        except Exception as e:
+            print(f"An error occurred: {e}")
+            break
+    return None
+
 
 # Create chatbot function
 def chat_with_gpt(history, new_prompt):
@@ -39,26 +84,25 @@ def chat_with_gpt(history, new_prompt):
         messages.append({"role": "user", "content": prompt})
         messages.append({"role": "assistant", "content": response})
 
+    # Feed chatbot website data
+    if new_prompt.startswith("http"):
+        url = new_prompt
+
+        # Process and return info
+        webpage_content = parse_webpage(fetch_webpage(url))
+        if webpage_content != "":
+            new_prompt = "Use this data for further responses: " + webpage_content
+        else:
+            new_prompt = ("Provide the user the link again and tell them that you"
+                          "do not have the permissions to extract it.")
+
     # Add new question
     messages.append({"role": "user", "content": new_prompt})
-    completion = client.chat.completions.create(
-        model="gpt-4",
-        messages=messages
-    )
+    completion = call_openai_api(messages)
 
-    if completion.choices[0].message.content.strip().startswith("["):
-        url_prompt = completion.choices[0].message.content.strip()
+    if completion is None:
+        return "Unable to process your request at this time due to API limits."
 
-        # Regular expression to find URLs in Markdown links
-        url_pattern = r'\]\((.*?)\)'
-        match = re.search(url_pattern, url_prompt)
-
-        if match:
-            url = match.group(1)
-        webpage = requests.get(url)
-        chat_with_gpt(history, webpage)
-
-    # Return new response
     return completion.choices[0].message.content.strip()
 
 if __name__ == "__main__":
