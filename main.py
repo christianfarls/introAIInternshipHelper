@@ -1,5 +1,5 @@
 # main.py
-
+import openai
 from openai import OpenAI
 from bs4 import BeautifulSoup
 import json
